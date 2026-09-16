@@ -5,7 +5,7 @@
 #   ./uninstall.sh [--purge] [--dry-run]
 set -euo pipefail
 
-WIDGET_ID=org.smolam.apodwallpaper
+WIDGET_IDS=(io.github.smolamsk.apodwallpaper org.smolam.apodwallpaper)   # current and first-release IDs
 CONF=${XDG_CONFIG_HOME:-$HOME/.config}/apod-wallpaper.conf
 CACHE=${XDG_DATA_HOME:-$HOME/.local/share}/apod-wallpaper
 UNITS=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
@@ -25,11 +25,14 @@ run() { if (( dry )); then echo "would run: $*"; else "$@"; fi; }
 # Remove the widget from panels first, so Plasma doesn't keep a broken placeholder.
 run gdbus call --session --dest org.kde.plasmashell --object-path /PlasmaShell \
     --method org.kde.PlasmaShell.evaluateScript \
-    "panels().forEach(function (p) { p.widgets('$WIDGET_ID').forEach(function (w) { w.remove(); }); });" || true
+    "panels().forEach(function (p) { ['${WIDGET_IDS[0]}', '${WIDGET_IDS[1]}'].forEach(function (id) {
+        p.widgets(id).forEach(function (w) { w.remove(); }); }); });" || true
 run systemctl --user disable --now apod-wallpaper.timer apod-wallpaper-watch.service apod-wallpaper.service || true
 run rm -f "$UNITS/apod-wallpaper.service" "$UNITS/apod-wallpaper.timer" "$UNITS/apod-wallpaper-watch.service"
 run systemctl --user daemon-reload
-run kpackagetool6 -t Plasma/Applet -r "$WIDGET_ID" || true
+for id in "${WIDGET_IDS[@]}"; do
+    if kpackagetool6 -t Plasma/Applet -s "$id" >/dev/null 2>&1; then run kpackagetool6 -t Plasma/Applet -r "$id"; fi
+done
 run rm -f "$HOME/.local/bin/apod-wallpaper"
 if (( purge )); then
     run rm -rf "$CONF" "$CACHE"

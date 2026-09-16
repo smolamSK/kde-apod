@@ -169,15 +169,18 @@ PlasmoidItem {
             }
 
             PlasmaComponents.ScrollView {
-                id: scroll
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                contentWidth: availableWidth
+                PlasmaComponents.ScrollBar.horizontal.policy: PlasmaComponents.ScrollBar.AlwaysOff
 
-                PlasmaComponents.Label {
-                    width: scroll.availableWidth
+                // A TextArea sizes itself to the ScrollView, avoiding a width binding loop.
+                PlasmaComponents.TextArea {
+                    readOnly: true
                     wrapMode: Text.Wrap
-                    textFormat: Text.PlainText
+                    textFormat: TextEdit.PlainText
+                    background: null
+                    leftPadding: 0
+                    selectByMouse: true
                     text: root.info.explanation || ""
                 }
             }

@@ -92,7 +92,7 @@ Your wallpaper stays as it is until you choose another one.
 | Script | `~/.local/bin/apod-wallpaper` |
 | Daily run (07:00 and at login) | `apod-wallpaper.timer` and `apod-wallpaper.service` (systemd user units) |
 | Monitor watcher (listens for display hotplug events from udev) | `apod-wallpaper-watch.service` |
-| Panel widget | `~/.local/share/plasma/plasmoids/org.smolam.apodwallpaper` |
+| Panel widget | `~/.local/share/plasma/plasmoids/io.github.smolamsk.apodwallpaper` |
 | Downloaded pictures, per-monitor copies, current mode | `~/.local/share/apod-wallpaper/` |
 
 Monitor sizes come from `kscreen-doctor`. The wallpaper is set per desktop through Plasma's scripting interface, and the lock screen through `kscreenlockerrc`.

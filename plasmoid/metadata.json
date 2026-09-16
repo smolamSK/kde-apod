@@ -4,7 +4,7 @@
         "Category": "Utilities",
         "Description": "Switch the NASA Astronomy Picture of the Day wallpaper between the latest and random archive pictures",
         "Icon": "kstars_planets-symbolic",
-        "Id": "org.smolam.apodwallpaper",
+        "Id": "io.github.smolamsk.apodwallpaper",
         "License": "GPL-2.0-or-later",
         "Name": "APOD Wallpaper",
         "Version": "1.0",

@@ -6,7 +6,8 @@
 set -euo pipefail
 cd "$(dirname "$(realpath "$0")")"
 
-WIDGET_ID=org.smolam.apodwallpaper
+WIDGET_ID=io.github.smolamsk.apodwallpaper
+OLD_WIDGET_ID=org.smolam.apodwallpaper   # used by the first release
 BIN=$HOME/.local/bin
 CONF=${XDG_CONFIG_HOME:-$HOME/.config}/apod-wallpaper.conf
 UNITS=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
@@ -79,6 +80,28 @@ else
     kpackagetool6 -t Plasma/Applet -i plasmoid >/dev/null
 fi
 
+plasma_script() {
+    gdbus call --session --dest org.kde.plasmashell --object-path /PlasmaShell \
+        --method org.kde.PlasmaShell.evaluateScript "$1"
+}
+
+if kpackagetool6 -t Plasma/Applet -s "$OLD_WIDGET_ID" >/dev/null 2>&1; then
+    # Put the renamed widget exactly where the old one sat, then drop the old package.
+    replaced=$(plasma_script "
+        var n = 0;
+        panels().forEach(function (p) {
+            p.widgets('$OLD_WIDGET_ID').forEach(function (w) {
+                var g = w.geometry;
+                p.addWidget('$WIDGET_ID', g.x, g.y, g.width, g.height);
+                w.remove();
+                n++;
+            });
+        });
+        print(n);" 2>/dev/null) || replaced=''
+    kpackagetool6 -t Plasma/Applet -r "$OLD_WIDGET_ID" >/dev/null 2>&1 || true
+    [[ $replaced =~ [1-9] ]] && say "Replaced the old widget on your panel"
+fi
+
 # --- Services --------------------------------------------------------------------
 say "Enabling the daily timer and the monitor watcher"
 systemctl --user daemon-reload
@@ -94,18 +117,14 @@ fi
 
 # --- Panel -----------------------------------------------------------------------
 on_panel() {
-    gdbus call --session --dest org.kde.plasmashell --object-path /PlasmaShell \
-        --method org.kde.PlasmaShell.evaluateScript \
-        "print(panels().some(function (p) { return p.widgets('$WIDGET_ID').length > 0; }))" 2>/dev/null |
+    plasma_script "print(panels().some(function (p) { return p.widgets('$WIDGET_ID').length > 0; }))" 2>/dev/null |
         grep -q true
 }
 if on_panel; then
     say "The widget is already on your panel"
 elif (( add_to_panel )); then
     say "Adding the widget to your panel"
-    gdbus call --session --dest org.kde.plasmashell --object-path /PlasmaShell \
-        --method org.kde.PlasmaShell.evaluateScript \
-        "var p = panels()[0]; if (p) p.addWidget('$WIDGET_ID');" >/dev/null
+    plasma_script "var p = panels()[0]; if (p) p.addWidget('$WIDGET_ID');" >/dev/null
 else
     say "To add the widget: right-click the panel > Add Widgets… > search \"APOD Wallpaper\""
     echo "    (or run ./install.sh --add-to-panel)"
