@@ -187,7 +187,7 @@ PlasmoidItem {
 
             PlasmaComponents.ToolButton {
                 Layout.alignment: Qt.AlignRight
-                text: "Open on apod.nasa.gov"
+                text: "Open on NASA Science"
                 icon.name: "internet-web-browser-symbolic"
                 enabled: !!root.info.page
                 onClicked: Qt.openUrlExternally(root.info.page)

@@ -1,6 +1,6 @@
 # kde-apod
 
-NASA's [Astronomy Picture of the Day](https://apod.nasa.gov) as your KDE Plasma 6 wallpaper, fitted to every monitor, with a panel widget to switch between today's picture and random ones from the archive.
+NASA's [Astronomy Picture of the Day](https://science.nasa.gov/apod/) as your KDE Plasma 6 wallpaper, fitted to every monitor, with a panel widget to switch between today's picture and random ones from the archive.
 
 ![The APOD Wallpaper panel widget](screenshot.png)
 

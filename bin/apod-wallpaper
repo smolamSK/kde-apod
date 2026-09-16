@@ -147,7 +147,7 @@ cmd_status() {
     jq -c --arg mode "$(get_mode)" --arg image "$image" '. + {
         mode: $mode, image: $image,
         credit: (.copyright // "" | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" ")),
-        page: (if .date then "https://apod.nasa.gov/apod/ap\(.date | gsub("-"; "") | .[2:]).html" else "" end)
+        page: (if .date then "https://science.nasa.gov/apod/?date=\(.date)" else "" end)
     }' "$meta"
 }
 
