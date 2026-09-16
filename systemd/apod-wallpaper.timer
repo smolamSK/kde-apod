@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily NASA APOD wallpaper update
+
+[Timer]
+# APOD publishes around midnight US Eastern (06:00 CEST).
+OnCalendar=*-*-* 07:00
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

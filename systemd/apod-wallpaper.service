@@ -1,0 +1,12 @@
+[Unit]
+Description=Set NASA Astronomy Picture of the Day as wallpaper
+After=plasma-plasmashell.service
+PartOf=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/apod-wallpaper update
+TimeoutStartSec=15min
+
+[Install]
+WantedBy=plasma-workspace.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Re-fit APOD wallpaper when monitors are plugged or unplugged
+After=plasma-plasmashell.service
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/apod-wallpaper watch
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=plasma-workspace.target

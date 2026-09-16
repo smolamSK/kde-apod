@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+# apod-wallpaper — set NASA's Astronomy Picture of the Day as the KDE Plasma
+# wallpaper (desktop + lock screen), rendered separately for every connected
+# monitor at its native resolution and aspect ratio.
+#
+#   apod-wallpaper update [--date YYYY-MM-DD]  daily run: newest picture, or a random one in random mode
+#   apod-wallpaper latest                      switch to latest mode and show today's picture
+#   apod-wallpaper random                      switch to random mode and show a random archive picture
+#   apod-wallpaper apply  [--image PATH]       re-fit the current image to the current monitors
+#   apod-wallpaper watch                       re-apply whenever a monitor is (un)plugged
+#   apod-wallpaper notify                      show the current picture's title again
+#   apod-wallpaper status                      current picture and mode as JSON (for the panel widget)
+#
+# Settings: ~/.config/apod-wallpaper.conf   Cache: ~/.local/share/apod-wallpaper/
+# https://github.com/smolamSK/kde-apod
+set -euo pipefail
+
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/apod-wallpaper.conf"
+CACHE="${XDG_DATA_HOME:-$HOME/.local/share}/apod-wallpaper"
+API_KEY=DEMO_KEY     # get a personal key at https://api.nasa.gov if DEMO_KEY gets rate-limited
+FIT_THRESHOLD=1.2    # aspect mismatch above which the image is fitted over a blurred copy instead of cropped
+KEEP_DAYS=7
+RANDOM_SINCE=2007-01-01   # random mode: pick from the archive since this date
+RANDOM_MIN_SIZE=1920      # random mode: skip pictures whose longer side is smaller
+RETRIES=10 RETRY_DELAY=30 RETRY_MAX=900   # patient in the background; the widget's commands give up sooner
+# shellcheck source=/dev/null
+[[ -f $CONF ]] && source "$CONF"
+mkdir -p "$CACHE"
+
+log() { echo "apod-wallpaper: $*" >&2; }
+
+# need CMD... — exit with a clear message if a required command is missing.
+need() {
+    local c missing=()
+    for c; do command -v "$c" >/dev/null || missing+=("$c"); done
+    (( ${#missing[@]} == 0 )) || { log "missing required commands: ${missing[*]}"; exit 1; }
+}
+
+# ImageMagick 7 is "magick"; distros still on ImageMagick 6 only have "convert".
+IM=$(command -v magick || command -v convert || true)
+
+lock() { exec 9>"$CACHE/.lock"; flock 9; }
+
+get_mode() { cat "$CACHE/mode" 2>/dev/null || echo latest; }
+
+# api QUERY — raw APOD API response, with a readable error for rate limits and bad keys.
+api() {
+    local out code
+    out=$(curl -sS --max-time 60 --retry "$RETRIES" --retry-delay "$RETRY_DELAY" --retry-max-time "$RETRY_MAX" \
+        -w '\n%{http_code}' "https://api.nasa.gov/planetary/apod?api_key=$API_KEY&$1") ||
+        { log "NASA API unreachable"; return 1; }
+    code=${out##*$'\n'}; out=${out%$'\n'*}
+    case $code in
+        200) printf '%s\n' "$out" ;;
+        429) log "NASA API rate limit reached; add a free personal key from https://api.nasa.gov to $CONF"; return 1 ;;
+        *) log "NASA API error $code: $(jq -r '.msg // .error.message // empty' <<<"$out" 2>/dev/null)"; return 1 ;;
+    esac
+}
+
+# The newest still image; a 10-day range so that on video days we fall back to the latest photo.
+latest_entry() {
+    api "start_date=$(date -d '-10 days' +%F)" |
+        jq -c '[if type == "array" then .[] else . end | select(.media_type == "image")] | last // empty'
+}
+
+# Still images with an HD version from a random month of the archive since RANDOM_SINCE,
+# shuffled: one API request gives plenty of candidates.
+random_entries() {
+    local days start
+    days=$(( ($(date +%s) - $(date -d "$RANDOM_SINCE" +%s)) / 86400 - 30 ))
+    start=$(date -d "$RANDOM_SINCE + $(( (RANDOM * 32768 + RANDOM) % days )) days" +%F)
+    api "start_date=$start&end_date=$(date -d "$start + 29 days" +%F)" |
+        jq -c '.[] | select(.media_type == "image" and .hdurl)' | shuf
+}
+
+# candidates latest|random|YYYY-MM-DD — APOD entries to try, one JSON object per line.
+candidates() {
+    case $1 in
+        latest) latest_entry ;;
+        random) random_entries ;;
+        *) api "date=$1" | jq -c 'select(.media_type == "image")' ;;
+    esac
+}
+
+# download ENTRY — print the path of the entry's cached original, downloading it if needed.
+download() {
+    local entry=$1 img_url ext orig
+    img_url=$(jq -r '.hdurl // .url' <<<"$entry")
+    ext=${img_url##*.}; ext=${ext%%\?*}; ext=${ext,,}
+    [[ $ext =~ ^(jpg|jpeg|png|gif|webp|tif|tiff)$ ]] || ext=jpg
+    orig="$CACHE/orig-$(jq -r .date <<<"$entry").$ext"
+    if [[ ! -s $orig ]]; then
+        log "downloading $(jq -r '"\(.date): \(.title)"' <<<"$entry")"
+        if ! curl -fsSL --max-time 300 --retry "$RETRIES" --retry-delay "$RETRY_DELAY" --retry-max-time "$RETRY_MAX" \
+                -o "$orig.part" "$img_url"; then
+            rm -f "$orig.part"; log "image download failed"; return 1
+        fi
+        mv "$orig.part" "$orig"
+    fi
+    echo "$orig"
+}
+
+big_enough() { (( $("$IM" "$1[0]" -format '%[fx:max(w,h)]\n' info:) >= RANDOM_MIN_SIZE )); }
+
+# show latest|random|YYYY-MM-DD — fetch a picture and make it the wallpaper.
+# On failure the current wallpaper stays (re-fitted to the monitors) and it returns 1.
+show() {
+    local kind=$1 entry orig
+    while read -r entry <&3; do
+        orig=$(download "$entry") || continue
+        # Many archive images are small; don't blow those up to full screen.
+        if [[ $kind == random ]] && ! big_enough "$orig"; then
+            log "$(basename "$orig") is under ${RANDOM_MIN_SIZE}px, trying another"
+            [[ $orig == "$(cat "$CACHE/current" 2>/dev/null)" ]] || rm -f "$orig"
+            continue
+        fi
+        set_entry "$entry" "$orig"
+        return
+    done 3< <(candidates "$kind" | head -n 5)
+    log "no picture fetched; keeping the current wallpaper"
+    cmd_apply "" || true
+    return 1
+}
+
+# Timer / login entry point: follows the mode chosen in the widget.
+cmd_update() {
+    local date_arg=$1
+    if [[ -n $date_arg ]]; then
+        show "$date_arg"
+    elif [[ $(get_mode) == latest ]]; then
+        show latest
+    elif [[ $(cat "$CACHE/changed" 2>/dev/null) == "$(date +%F)" ]]; then
+        cmd_apply ""   # random mode, already shuffled today: don't reshuffle on every login
+    else
+        show random
+    fi
+}
+
+# Status for the panel widget: current picture's metadata plus mode, render and APOD page.
+cmd_status() {
+    local meta="$CACHE/meta.json" image='' cur key
+    [[ -f $meta ]] || meta=<(echo '{}')
+    if [[ -f $CACHE/current ]]; then
+        cur=$(<"$CACHE/current"); key=$(basename "${cur%.*}"); key=${key#orig-}
+        image=$(ls -t "$CACHE"/render-"$key"-*.jpg 2>/dev/null | head -1) || true
+    fi
+    jq -c --arg mode "$(get_mode)" --arg image "$image" '. + {
+        mode: $mode, image: $image,
+        credit: (.copyright // "" | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" ")),
+        page: (if .date then "https://apod.nasa.gov/apod/ap\(.date | gsub("-"; "") | .[2:]).html" else "" end)
+    }' "$meta"
+}
+
+# set_entry ENTRY ORIG — make the downloaded picture current and apply it.
+set_entry() {
+    local entry=$1 orig=$2 is_new=0
+    [[ $(cat "$CACHE/current" 2>/dev/null) == "$orig" ]] || is_new=1
+    jq . <<<"$entry" >"$CACHE/meta.json"
+    echo "$orig" >"$CACHE/current"
+    date +%F >"$CACHE/changed"
+
+    cmd_apply ""
+    prune
+    # Only announce a picture change, not every login or re-apply of the same image.
+    if (( is_new )); then notify; fi
+}
+
+# Desktop notification with the current picture's title, date, credit and NASA's explanation.
+notify() {
+    local meta="$CACHE/meta.json" body icon
+    [[ -f $meta ]] || return 0
+    body=$(jq -r '
+        (.copyright // "" | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" ")) as $c
+        | "\(.date)\(if $c != "" then " · © " + $c else "" end)\n\n\(.explanation)"
+        | gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;")' "$meta")
+    icon=$(ls -t "$CACHE"/render-*.jpg 2>/dev/null | head -1)
+    notify-send --app-name="NASA APOD" --icon="${icon:-image-x-generic}" \
+        "$(jq -r .title "$meta")" "$body" && log "notified: $(jq -r .title "$meta")" || log "notification failed"
+}
+
+# Print "name x y width height priority" for every enabled monitor, using the
+# native pixel size of its current mode (swapped when rotated 90°/270°).
+list_outputs() {
+    kscreen-doctor -j | jq -r '
+        .outputs[] | select(.connected and .enabled) | . as $o
+        | ($o.modes[] | select(.id == $o.currentModeId) | .size) as $s
+        | (if ($o.rotation == 2 or $o.rotation == 8) then [$s.height, $s.width] else [$s.width, $s.height] end) as $wh
+        | "\($o.name) \($o.pos.x) \($o.pos.y) \($wh[0]) \($wh[1]) \($o.priority)"'
+}
+
+# render SRC W H OUT — crop to fill when the aspect ratios are close, otherwise
+# fit the whole image over a darkened, blurred, screen-filling copy of itself.
+render() {
+    local src=$1 w=$2 h=$3 out=$4 iw ih mode
+    read -r iw ih < <("$IM" "$src[0]" -auto-orient -format '%w %h\n' info:)
+    mode=$(awk -v iw="$iw" -v ih="$ih" -v w="$w" -v h="$h" -v t="$FIT_THRESHOLD" \
+        'BEGIN { r = (iw / ih) / (w / h); if (r < 1) r = 1 / r; print (r <= t ? "crop" : "fit") }')
+    log "rendering ${iw}x${ih} -> ${w}x${h} ($mode)"
+    if [[ $mode == crop ]]; then
+        "$IM" "$src[0]" -auto-orient -resize "${w}x${h}^" -gravity center -extent "${w}x${h}" \
+            -quality 92 "$out.part.jpg"
+    else
+        "$IM" "$src[0]" -auto-orient -write mpr:s +delete \
+            \( mpr:s -resize "${w}x${h}^" -gravity center -extent "${w}x${h}" \
+               -scale 10% -blur 0x6 -resize "${w}x${h}!" -modulate 60 \) \
+            \( mpr:s -resize "${w}x${h}" \) \
+            -gravity center -composite -quality 92 "$out.part.jpg"
+    fi
+    mv "$out.part.jpg" "$out"
+}
+
+cmd_apply() {
+    local orig=$1 key name x y w h prio out map='{}' primary='' best_prio=999999
+    if [[ -z $orig && -f $CACHE/current ]]; then orig=$(<"$CACHE/current"); fi
+    if [[ -z $orig || ! -f $orig ]]; then
+        log "no image available to apply"
+        return 1
+    fi
+    key=$(basename "${orig%.*}")
+    if [[ $key == orig-* ]]; then key=${key#orig-}; else key="custom-$(md5sum "$orig" | cut -c1-8)"; fi
+
+    while read -r name x y w h prio; do
+        [[ -n $name ]] || continue
+        # Unique name per image/monitor/size, so Plasma never shows a stale cached file.
+        out="$CACHE/render-$key-$name-${w}x$h.jpg"
+        [[ -s $out ]] || render "$orig" "$w" "$h" "$out"
+        touch "$out"
+        map=$(jq -c --arg k "$x,$y" --arg v "file://$out" '. + {($k): $v}' <<<"$map")
+        if (( prio < best_prio )); then best_prio=$prio; primary=$out; fi
+    done < <(list_outputs)
+
+    if [[ -z $primary ]]; then
+        log "no enabled monitors found"
+        return 1
+    fi
+
+    # Desktops are matched to monitors by the logical top-left corner of their screen.
+    gdbus call --session --dest org.kde.plasmashell --object-path /PlasmaShell \
+        --method org.kde.PlasmaShell.evaluateScript "
+        var map = $map;
+        var urls = Object.keys(map).map(function (k) { return map[k]; });
+        desktops().forEach(function (d) {
+            if (d.screen < 0) return;
+            var g = screenGeometry(d.screen);
+            var url = map[g.x + ',' + g.y] || (urls.length == 1 ? urls[0] : null);
+            if (!url) return;
+            d.wallpaperPlugin = 'org.kde.image';
+            d.currentConfigGroup = ['Wallpaper', 'org.kde.image', 'General'];
+            d.writeConfig('Image', url);
+            d.writeConfig('FillMode', 2);
+        });" >/dev/null
+
+    local g=(--file kscreenlockerrc --group Greeter --group Wallpaper --group org.kde.image --group General)
+    kwriteconfig6 "${g[@]}" --key Image "file://$primary"
+    kwriteconfig6 "${g[@]}" --key PreviewImage "file://$primary"
+    log "applied $key to $(jq -r 'length' <<<"$map") monitor(s)"
+}
+
+# Drop cached originals and renders older than KEEP_DAYS, except the current image's.
+prune() {
+    local cur key
+    cur=$(<"$CACHE/current")
+    key=$(basename "${cur%.*}"); key=${key#orig-}
+    find "$CACHE" -maxdepth 1 -type f \( -name 'orig-*' -o -name 'render-*' \) \
+        -mtime +"$KEEP_DAYS" ! -name "*$key*" -delete
+}
+
+cmd_watch() {
+    log "watching for monitor hotplug events"
+    udevadm monitor --udev --subsystem-match=drm | while read -r line; do
+        [[ $line == 'UDEV  ['* ]] || continue
+        # Debounce the burst of events, then give KWin and Plasma time to set up the new screen.
+        while read -r -t 3 _; do :; done
+        log "monitor configuration changed; re-fitting"
+        "$0" apply || log "apply failed"
+        sleep 5
+        "$0" apply || log "apply failed"
+    done
+}
+
+cmd=${1:-update}; shift || true
+case $cmd in
+    update|latest|random|apply) need curl jq kscreen-doctor kwriteconfig6 gdbus notify-send flock shuf
+        [[ -n $IM ]] || { log "missing required command: magick (ImageMagick)"; exit 1; } ;;&
+    watch) need udevadm ;;&
+    update)
+        date_arg=''
+        if [[ ${1:-} == --date ]]; then date_arg=${2:?--date needs YYYY-MM-DD}; fi
+        lock; cmd_update "$date_arg" ;;
+    apply)
+        image=''
+        if [[ ${1:-} == --image ]]; then image=$(realpath "${2:?--image needs a path}"); fi
+        lock; cmd_apply "$image" ;;
+    latest)
+        RETRIES=2 RETRY_DELAY=3 RETRY_MAX=20
+        lock; show latest && echo latest >"$CACHE/mode" ;;
+    random)
+        RETRIES=2 RETRY_DELAY=3 RETRY_MAX=20
+        lock; show random && echo random >"$CACHE/mode" ;;
+    status) cmd_status ;;
+    watch) cmd_watch ;;
+    notify) notify ;;
+    *) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac
