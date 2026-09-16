@@ -26,7 +26,6 @@ RANDOM_MIN_SIZE=1920      # random mode: skip pictures whose longer side is smal
 RETRIES=10 RETRY_DELAY=30 RETRY_MAX=900   # patient in the background; the widget's commands give up sooner
 # shellcheck source=/dev/null
 [[ -f $CONF ]] && source "$CONF"
-mkdir -p "$CACHE"
 
 log() { echo "apod-wallpaper: $*" >&2; }
 
@@ -40,9 +39,25 @@ need() {
 # ImageMagick 7 is "magick"; distros still on ImageMagick 6 only have "convert".
 IM=$(command -v magick || command -v convert || true)
 
-lock() { exec 9>"$CACHE/.lock"; flock 9; }
+lock() { mkdir -p "$CACHE"; exec 9>"$CACHE/.lock"; flock 9; }
 
 get_mode() { cat "$CACHE/mode" 2>/dev/null || echo latest; }
+
+# A personal key from api.nasa.gov is a long alphanumeric string; anything else
+# (DEMO_KEY, empty, a pasted placeholder) means the shared, rate-limited key.
+key_is_personal() { [[ $API_KEY =~ ^[A-Za-z0-9]{20,}$ && $API_KEY != DEMO_KEY ]]; }
+
+key_hint() {
+    cat <<EOF
+Get a free personal NASA API key (much higher limits) at https://api.nasa.gov:
+  1. Fill in your name and email in the "Generate API Key" form.
+  2. The key is shown right away and also emailed to you.
+  3. Save it, either from the kde-apod folder:
+       ./install.sh --api-key YOUR_KEY
+     or by adding this line to $CONF:
+       API_KEY=YOUR_KEY
+EOF
+}
 
 # api QUERY — raw APOD API response, with a readable error for rate limits and bad keys.
 api() {
@@ -53,7 +68,7 @@ api() {
     code=${out##*$'\n'}; out=${out%$'\n'*}
     case $code in
         200) printf '%s\n' "$out" ;;
-        429) log "NASA API rate limit reached; add a free personal key from https://api.nasa.gov to $CONF"; return 1 ;;
+        429) log "NASA API rate limit reached$(key_is_personal || echo ' (shared DEMO_KEY); run: apod-wallpaper help')"; return 1 ;;
         *) log "NASA API error $code: $(jq -r '.msg // .error.message // empty' <<<"$out" 2>/dev/null)"; return 1 ;;
     esac
 }
@@ -140,16 +155,15 @@ cmd_update() {
 # Status for the panel widget: current picture's metadata plus mode, render and APOD page.
 cmd_status() {
     local meta="$CACHE/meta.json" image='' cur key
-    [[ -f $meta ]] || meta=<(echo '{}')
     if [[ -f $CACHE/current ]]; then
         cur=$(<"$CACHE/current"); key=$(basename "${cur%.*}"); key=${key#orig-}
         image=$(ls -t "$CACHE"/render-"$key"-*.jpg 2>/dev/null | head -1) || true
     fi
-    jq -c --arg mode "$(get_mode)" --arg image "$image" '. + {
+    jq -c --arg mode "$(get_mode)" --arg image "$image" 'input | . + {
         mode: $mode, image: $image,
         credit: (.copyright // "" | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" ")),
         page: (if .date then "https://science.nasa.gov/apod/?date=\(.date)" else "" end)
-    }' "$meta"
+    }' -n <<<"$([[ -f $meta ]] && cat "$meta" || echo '{}')"
 }
 
 # set_entry ENTRY ORIG — make the downloaded picture current and apply it.
@@ -280,21 +294,17 @@ cmd_watch() {
 }
 
 usage() {
-    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+    # The comment header up to the first non-comment line, minus the Settings/URL lines.
+    sed -n '2,/^[^#]/{/^[^#]/d; /^# Settings:/d; /^# https:/d; s/^# \{0,1\}//p}' "$0"
+    echo "Settings: $CONF$([[ -f $CONF ]] || echo ' (not created yet)')"
+    echo "Cache:    $CACHE"
+    echo "Source:   https://github.com/smolamSK/kde-apod"
     echo
-    if [[ $API_KEY == DEMO_KEY ]]; then
-        cat <<EOF
-NASA API key: DEMO_KEY (shared and rate-limited per IP address; runs out quickly)
-  Get a free personal key (much higher limits) at https://api.nasa.gov:
-    1. Fill in your name and email in the "Generate API Key" form.
-    2. The key is shown right away and also emailed to you.
-    3. Save it, either from the kde-apod folder:
-         ./install.sh --api-key YOUR_KEY
-       or by adding this line to $CONF:
-         API_KEY=YOUR_KEY
-EOF
+    if key_is_personal; then
+        echo "NASA API key: personal key (from $CONF)"
     else
-        echo "NASA API key: personal key ${API_KEY:0:4}… (from $CONF)"
+        echo "NASA API key: shared DEMO_KEY (rate-limited per IP address; runs out quickly)"
+        key_hint | sed 's/^/  /'
     fi
 }
 
@@ -321,5 +331,5 @@ case $cmd in
     watch) cmd_watch ;;
     notify) notify ;;
     help|-h|--help) usage ;;
-    *) usage >&2; exit 2 ;;
+    *) log "unknown command: $cmd"; log "run: apod-wallpaper help"; exit 2 ;;
 esac

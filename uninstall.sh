@@ -15,7 +15,7 @@ for arg; do
     case $arg in
         --purge) purge=1 ;;
         --dry-run) dry=1 ;;
-        -h|--help) sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,/^[^#]/{/^[^#]/d; s/^# \{0,1\}//p}' "$0"; exit 0 ;;
         *) echo "unknown option: $arg" >&2; exit 2 ;;
     esac
 done

@@ -19,7 +19,7 @@ while (( $# )); do
         --api-key) api_key=${2:?--api-key needs a value}; shift ;;
         --api-key=*) api_key=${1#*=} ;;
         --add-to-panel) add_to_panel=1 ;;
-        -h|--help) sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,/^[^#]/{/^[^#]/d; s/^# \{0,1\}//p}' "$0"; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
     shift
@@ -27,6 +27,10 @@ done
 
 say() { printf '\e[1m==>\e[0m %s\n' "$*"; }
 die() { printf '\e[31merror:\e[0m %s\n' "$*" >&2; exit 1; }
+
+# Keys from api.nasa.gov are alphanumeric; the config is sourced by bash, so never write anything else.
+[[ -z $api_key || $api_key =~ ^[A-Za-z0-9]{20,}$ ]] ||
+    die "that doesn't look like a NASA API key (expected letters and digits only): $api_key"
 
 # --- Requirements ----------------------------------------------------------------
 command -v plasmashell >/dev/null && command -v kpackagetool6 >/dev/null ||
@@ -64,7 +68,7 @@ fi
 if [[ -n $api_key ]]; then
     say "Saving NASA API key to $CONF"
     grep -v -E '^#?API_KEY=' "$CONF" >"$CONF.tmp" || true
-    printf 'API_KEY=%s\n' "$api_key" >>"$CONF.tmp"
+    printf "API_KEY='%s'\n" "$api_key" >>"$CONF.tmp"
     mv "$CONF.tmp" "$CONF"
 fi
 
@@ -130,7 +134,8 @@ else
     echo "    (or run ./install.sh --add-to-panel)"
 fi
 
-if ! grep -q -E '^API_KEY=' "$CONF" || grep -q -E '^API_KEY=DEMO_KEY' "$CONF"; then
+# Let the installed script decide whether a personal key is configured (same logic as `help`).
+if "$BIN/apod-wallpaper" help | grep -q 'shared DEMO_KEY'; then
     echo
     echo "Tip: the shared DEMO_KEY is rate-limited. Get a free NASA API key at https://api.nasa.gov"
     echo "     and run: ./install.sh --api-key YOUR_KEY"

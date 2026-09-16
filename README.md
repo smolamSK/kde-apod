@@ -57,7 +57,7 @@ Settings are in `~/.config/apod-wallpaper.conf`:
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `API_KEY` | `DEMO_KEY` | NASA API key |
+| `API_KEY` | `DEMO_KEY` | NASA API key, letters and digits only, as issued by api.nasa.gov. `apod-wallpaper help` shows whether the shared `DEMO_KEY` or a personal key is in use. |
 | `FIT_THRESHOLD` | `1.2` | How different the picture and screen shapes may be before the picture is shown whole over a blurred background instead of cropped. `1.2` crops away at most about 17%. |
 | `RANDOM_SINCE` | `2007-01-01` | Random mode only picks pictures from this date on. Older ones are mostly small. |
 | `RANDOM_MIN_SIZE` | `1920` | Random mode skips pictures whose longer side is smaller than this many pixels. |
