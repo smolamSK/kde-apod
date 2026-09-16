@@ -10,6 +10,7 @@
 #   apod-wallpaper watch                       re-apply whenever a monitor is (un)plugged
 #   apod-wallpaper notify                      show the current picture's title again
 #   apod-wallpaper status                      current picture and mode as JSON (for the panel widget)
+#   apod-wallpaper help                        these commands, plus which NASA API key is used
 #
 # Settings: ~/.config/apod-wallpaper.conf   Cache: ~/.local/share/apod-wallpaper/
 # https://github.com/smolamSK/kde-apod
@@ -278,6 +279,25 @@ cmd_watch() {
     done
 }
 
+usage() {
+    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+    echo
+    if [[ $API_KEY == DEMO_KEY ]]; then
+        cat <<EOF
+NASA API key: DEMO_KEY (shared and rate-limited per IP address; runs out quickly)
+  Get a free personal key (much higher limits) at https://api.nasa.gov:
+    1. Fill in your name and email in the "Generate API Key" form.
+    2. The key is shown right away and also emailed to you.
+    3. Save it, either from the kde-apod folder:
+         ./install.sh --api-key YOUR_KEY
+       or by adding this line to $CONF:
+         API_KEY=YOUR_KEY
+EOF
+    else
+        echo "NASA API key: personal key ${API_KEY:0:4}… (from $CONF)"
+    fi
+}
+
 cmd=${1:-update}; shift || true
 case $cmd in
     update|latest|random|apply) need curl jq kscreen-doctor kwriteconfig6 gdbus notify-send flock shuf
@@ -300,5 +320,6 @@ case $cmd in
     status) cmd_status ;;
     watch) cmd_watch ;;
     notify) notify ;;
-    *) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    help|-h|--help) usage ;;
+    *) usage >&2; exit 2 ;;
 esac

@@ -74,6 +74,7 @@ apod-wallpaper random                      switch to random mode and show a rand
 apod-wallpaper apply  [--image PATH]       re-fit the current image to the current monitors
 apod-wallpaper notify                      show the current picture's title again
 apod-wallpaper status                      current picture and mode as JSON
+apod-wallpaper help                        these commands, plus whether DEMO_KEY or a personal key is used
 ```
 
 ## Uninstall
