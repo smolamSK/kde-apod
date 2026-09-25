@@ -98,22 +98,38 @@ candidates() {
     esac
 }
 
+# orig_path ENTRY URL [SUFFIX] — cache path for the entry's original, with the URL's extension.
+orig_path() {
+    local ext=${2##*.}; ext=${ext%%\?*}; ext=${ext,,}
+    [[ $ext =~ ^(jpg|jpeg|png|gif|webp|tif|tiff)$ ]] || ext=jpg
+    echo "$CACHE/orig-$(jq -r .date <<<"$1")${3:+-$3}.$ext"
+}
+
+# fetch URL FILE — download URL to FILE, leaving nothing behind on failure.
+fetch() {
+    curl -fsSL --max-time 300 --retry "$RETRIES" --retry-delay "$RETRY_DELAY" --retry-max-time "$RETRY_MAX" \
+        -o "$2.part" "$1" && mv "$2.part" "$2" && return
+    rm -f "$2.part"; return 1
+}
+
 # download ENTRY — print the path of the entry's cached original, downloading it if needed.
 download() {
-    local entry=$1 img_url ext orig
-    img_url=$(jq -r '.hdurl // .url' <<<"$entry")
-    ext=${img_url##*.}; ext=${ext%%\?*}; ext=${ext,,}
-    [[ $ext =~ ^(jpg|jpeg|png|gif|webp|tif|tiff)$ ]] || ext=jpg
-    orig="$CACHE/orig-$(jq -r .date <<<"$entry").$ext"
-    if [[ ! -s $orig ]]; then
-        log "downloading $(jq -r '"\(.date): \(.title)"' <<<"$entry")"
-        if ! curl -fsSL --max-time 300 --retry "$RETRIES" --retry-delay "$RETRY_DELAY" --retry-max-time "$RETRY_MAX" \
-                -o "$orig.part" "$img_url"; then
-            rm -f "$orig.part"; log "image download failed"; return 1
+    local entry=$1 hd sd orig
+    hd=$(jq -r '.hdurl // .url' <<<"$entry"); sd=$(jq -r '.url // empty' <<<"$entry")
+    orig=$(orig_path "$entry" "$hd")
+    if [[ -s $orig ]]; then echo "$orig"; return; fi
+    log "downloading $(jq -r '"\(.date): \(.title)"' <<<"$entry")"
+    if fetch "$hd" "$orig"; then echo "$orig"; return; fi
+    # NASA sometimes lists an HD image that isn't on the server (yet). Use the standard-size
+    # one, cached under its own name so a later run still picks up the HD image.
+    if [[ -n $sd && $sd != "$hd" ]]; then
+        orig=$(orig_path "$entry" "$sd" sd)
+        if [[ -s $orig ]] || fetch "$sd" "$orig"; then
+            log "HD image unavailable; using the standard-size one"
+            echo "$orig"; return
         fi
-        mv "$orig.part" "$orig"
     fi
-    echo "$orig"
+    log "image download failed"; return 1
 }
 
 big_enough() { (( $("$IM" "$1[0]" -format '%[fx:max(w,h)]\n' info:) >= RANDOM_MIN_SIZE )); }
@@ -168,8 +184,10 @@ cmd_status() {
 
 # set_entry ENTRY ORIG — make the downloaded picture current and apply it.
 set_entry() {
-    local entry=$1 orig=$2 is_new=0
-    [[ $(cat "$CACHE/current" 2>/dev/null) == "$orig" ]] || is_new=1
+    local entry=$1 orig=$2 is_new=0 cur
+    cur=$(cat "$CACHE/current" 2>/dev/null)
+    # The HD image replacing its standard-size stand-in isn't a new picture.
+    [[ $cur == "$orig" || $cur == "$CACHE/orig-$(jq -r .date <<<"$entry")-sd."* ]] || is_new=1
     jq . <<<"$entry" >"$CACHE/meta.json"
     echo "$orig" >"$CACHE/current"
     date +%F >"$CACHE/changed"
