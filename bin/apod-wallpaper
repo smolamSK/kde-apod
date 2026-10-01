@@ -61,11 +61,13 @@ EOF
 
 # api QUERY — raw APOD API response, with a readable error for rate limits and bad keys.
 api() {
-    local out code
-    out=$(curl -sS --max-time 60 --retry "$RETRIES" --retry-delay "$RETRY_DELAY" --retry-max-time "$RETRY_MAX" \
-        -w '\n%{http_code}' "https://api.nasa.gov/planetary/apod?api_key=$API_KEY&$1") ||
-        { log "NASA API unreachable"; return 1; }
-    code=${out##*$'\n'}; out=${out%$'\n'*}
+    local out code tmp
+    # Via a file, which curl truncates before each retry; on stdout a failed attempt's body would stay.
+    tmp=$(mktemp)
+    code=$(curl -sS --max-time 60 --retry "$RETRIES" --retry-delay "$RETRY_DELAY" --retry-max-time "$RETRY_MAX" \
+        -o "$tmp" -w '%{http_code}' "https://api.nasa.gov/planetary/apod?api_key=$API_KEY&$1") ||
+        { rm -f "$tmp"; log "NASA API unreachable"; return 1; }
+    out=$(<"$tmp"); rm -f "$tmp"
     case $code in
         200) printf '%s\n' "$out" ;;
         429) log "NASA API rate limit reached$(key_is_personal || echo ' (shared DEMO_KEY); run: apod-wallpaper help')"; return 1 ;;
@@ -73,28 +75,85 @@ api() {
     esac
 }
 
-# The newest still image; a 10-day range so that on video days we fall back to the latest photo.
-latest_entry() {
-    api "start_date=$(date -d '-10 days' +%F)" |
-        jq -c '[if type == "array" then .[] else . end | select(.media_type == "image")] | last // empty'
+# Since APOD moved to science.nasa.gov the API can return the site's logo and name
+# instead of the real entry; such entries, and bare {"date": ...} stubs, need page_entry.
+NEEDS_PAGE='(.title == null or .title == "NASA Science" or (.url // "" | test("/wp-content/themes/")))'
+
+# entries QUERY DATE... — APOD API entries for QUERY, one per line, keeping still images
+# and entries that need page_entry; if the API fails, {"date": ...} stubs for DATE... instead.
+entries() {
+    local query=$1 out; shift
+    if out=$(api "$query"); then
+        jq -c "if type == \"array\" then .[] else . end | select($NEEDS_PAGE or .media_type == \"image\")" <<<"$out"
+    else
+        log "trying the APOD website instead"
+        printf '{"date":"%s"}\n' "$@"
+    fi
 }
 
-# Still images with an HD version from a random month of the archive since RANDOM_SINCE,
-# shuffled: one API request gives plenty of candidates.
+# page_entry DATE — the APOD entry for DATE read from its science.nasa.gov page, in the API's format.
+page_entry() {
+    local date=$1 html
+    html=$(curl -fsSL --max-time 60 --retry "$RETRIES" --retry-delay "$RETRY_DELAY" --retry-max-time "$RETRY_MAX" \
+        "https://science.nasa.gov/apod/?date=$date") || { log "APOD page for $date unreachable"; return 1; }
+    # Unpublished dates show the APOD landing page, whose og:title has no date.
+    jq -Rsc --arg date "$date" --arg want "$(LC_ALL=C date -d "$date" '+APOD: %Y %B %-d ')" '
+        def text: gsub("<br[^>]*>"; " ") | gsub("<[^>]*>"; "")
+            | gsub("&#(?<n>[0-9]+);"; [.n | tonumber] | implode)
+            | gsub("&amp;"; "&") | gsub("&lt;"; "<") | gsub("&gt;"; ">") | gsub("&quot;"; "\"") | gsub("&nbsp;"; " ")
+            | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" ");
+        def grab(re): [match(re).captures[0].string][0];
+        gsub("\n"; " ") as $h
+        | select($h | grab("<meta property=\"og:title\" content=\"([^\"]*)\"") // "" | startswith($want))
+        # The picture (or video) is the last media element before the heading; og:image is
+        # sometimes a generic thumbnail. The original sits under content/dam without the query.
+        | ($h | split("<h1 class=\"display-48")[0] | [match("<img [^>]*?src=\"[^\"]*\"|<iframe|<video"; "g").string] | last // "") as $hero
+        | ($hero | grab("src=\"(https://assets\\.science\\.nasa\\.gov/[^\"?]*)")
+           | if . then sub("/dynamicimage/assets/"; "/content/dam/") else . end) as $img
+        | {
+            date: $date,
+            title: ($h | grab("<h1 class=\"display-48[^>]*>(.*?)</h1>") | values | text),
+            explanation: ($h | grab("media-detail-hero__description\">(.*?)</p>") | values | text | sub("^Explanation: ?"; "")),
+            copyright: ($h | grab(">[^<]*Credit[^<]*</th>\\s*<td[^>]*>(.*?)</td>") | values | text
+                        | sub("^(Image |Video )?Credit( & Copyright)?: ?"; "")),
+            media_type: (if $hero | test("^<(iframe|video)") then "video" elif $img then "image" else "other" end),
+            url: $img, hdurl: $img
+          }
+        | select(.title)' <<<"$html" | grep . || { log "no APOD entry for $date on the website"; return 1; }
+}
+
+# resolve ENTRY — the entry itself, or its page_entry when the API's copy is bad; fails unless a still image.
+resolve() {
+    local entry=$1
+    if jq -e "$NEEDS_PAGE" <<<"$entry" >/dev/null; then
+        entry=$(page_entry "$(jq -r .date <<<"$entry")") || return 1
+    fi
+    jq -e '.media_type == "image" and .hdurl' <<<"$entry" >/dev/null || return 1
+    echo "$entry"
+}
+
+# Newest first over 10 days, so that on video days we fall back to the latest photo.
+latest_entries() {
+    local i dates=()
+    for i in {10..0}; do dates+=("$(date -d "-$i days" +%F)"); done
+    entries "start_date=${dates[0]}" "${dates[@]}" | tac
+}
+
+# A random month of the archive since RANDOM_SINCE, shuffled: one API request gives plenty of candidates.
 random_entries() {
-    local days start
+    local days start i dates=()
     days=$(( ($(date +%s) - $(date -d "$RANDOM_SINCE" +%s)) / 86400 - 30 ))
     start=$(date -d "$RANDOM_SINCE + $(( (RANDOM * 32768 + RANDOM) % days )) days" +%F)
-    api "start_date=$start&end_date=$(date -d "$start + 29 days" +%F)" |
-        jq -c '.[] | select(.media_type == "image" and .hdurl)' | shuf
+    for i in {0..29}; do dates+=("$(date -d "$start + $i days" +%F)"); done
+    entries "start_date=$start&end_date=${dates[29]}" "${dates[@]}" | shuf
 }
 
 # candidates latest|random|YYYY-MM-DD — APOD entries to try, one JSON object per line.
 candidates() {
     case $1 in
-        latest) latest_entry ;;
+        latest) latest_entries ;;
         random) random_entries ;;
-        *) api "date=$1" | jq -c 'select(.media_type == "image")' ;;
+        *) entries "date=$1" "$1" ;;
     esac
 }
 
@@ -105,10 +164,15 @@ orig_path() {
     echo "$CACHE/orig-$(jq -r .date <<<"$1")${3:+-$3}.$ext"
 }
 
-# fetch URL FILE — download URL to FILE, leaving nothing behind on failure.
+# fetch URL FILE — download URL to FILE (a cached original), leaving nothing behind on failure.
 fetch() {
-    curl -fsSL --max-time 300 --retry "$RETRIES" --retry-delay "$RETRY_DELAY" --retry-max-time "$RETRY_MAX" \
-        -o "$2.part" "$1" && mv "$2.part" "$2" && return
+    local key
+    if curl -fsSL --max-time 300 --retry "$RETRIES" --retry-delay "$RETRY_DELAY" --retry-max-time "$RETRY_MAX" \
+            -o "$2.part" "$1" && mv "$2.part" "$2"; then
+        # Renders are named by the original's key only; drop any made from an earlier download of it.
+        key=$(basename "${2%.*}"); rm -f "$CACHE/render-${key#orig-}-"*
+        return
+    fi
     rm -f "$2.part"; return 1
 }
 
@@ -139,6 +203,7 @@ big_enough() { (( $("$IM" "$1[0]" -format '%[fx:max(w,h)]\n' info:) >= RANDOM_MI
 show() {
     local kind=$1 entry orig
     while read -r entry <&3; do
+        entry=$(resolve "$entry") || continue
         orig=$(download "$entry") || continue
         # Many archive images are small; don't blow those up to full screen.
         if [[ $kind == random ]] && ! big_enough "$orig"; then
