@@ -50,10 +50,16 @@ PlasmoidItem {
             }
             root.busy = false
             if (data["exit code"] !== 0) {
-                // The first log line names the cause (rate limit, network…); later ones are follow-up.
-                const cause = data.stderr.split("\n")
-                    .map(l => l.replace(/^apod-wallpaper: /, "").trim())
-                    .find(l => l && !/^(no picture fetched|applied|rendering|downloading)/.test(l))
+                // The script's first log line that isn't progress names the cause (rate limit,
+                // network…); curl's and ImageMagick's own lines are too technical to show.
+                // Once the script has fallen back to the APOD website, the API's error is no longer it.
+                const prefix = "apod-wallpaper: "
+                const lines = data.stderr.split("\n")
+                    .filter(l => l.startsWith(prefix))
+                    .map(l => l.slice(prefix.length).trim())
+                const isCause = l => l && !/^(no picture fetched|applied|rendering|downloading|trying )|is under \d+px|using the standard-size/.test(l)
+                const cause = lines.slice(lines.lastIndexOf("trying the APOD website instead") + 1).find(isCause)
+                    || lines.find(isCause)
                 root.error = cause || "Couldn't fetch a picture"
             }
             root.refresh()

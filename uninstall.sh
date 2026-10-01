@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Remove apod-wallpaper for the current user. Settings and downloaded pictures are
-# kept unless --purge is given. The current wallpaper stays until you pick another.
+# kept unless --purge is given; without it, the current wallpaper stays until you pick another.
 #
 #   ./uninstall.sh [--purge] [--dry-run]
 set -euo pipefail
@@ -36,7 +36,15 @@ done
 run rm -f "$HOME/.local/bin/apod-wallpaper"
 if (( purge )); then
     run rm -rf "$CONF" "$CACHE"
+    # A lock screen showing a removed picture would be black; without these keys it uses Plasma's default.
+    lockscreen=(--file kscreenlockerrc --group Greeter --group Wallpaper --group org.kde.image --group General)
+    if [[ $(kreadconfig6 "${lockscreen[@]}" --key Image 2>/dev/null) == "file://$CACHE/"* ]]; then
+        run kwriteconfig6 "${lockscreen[@]}" --key Image --delete
+        run kwriteconfig6 "${lockscreen[@]}" --key PreviewImage --delete
+    fi
+    done_msg="apod-wallpaper and its pictures removed. If your desktop showed one of them, choose a new wallpaper: right-click the desktop > Desktop and Wallpaper."
 else
     echo "Kept settings ($CONF) and pictures ($CACHE); use --purge to remove them."
+    done_msg="apod-wallpaper removed. Your current wallpaper stays until you choose another one."
 fi
-(( dry )) && echo "(dry run: nothing was changed)" || echo "apod-wallpaper removed. Your current wallpaper stays until you choose another one."
+(( dry )) && echo "(dry run: nothing was changed)" || echo "$done_msg"

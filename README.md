@@ -84,7 +84,7 @@ apod-wallpaper help                        these commands, plus whether DEMO_KEY
 ./uninstall.sh --purge   # removes those too
 ```
 
-Your wallpaper stays as it is until you choose another one.
+Your wallpaper stays as it is until you choose another one. With `--purge`, the pictures it uses are removed too: the lock screen goes back to Plasma's default, and you choose a new desktop wallpaper yourself.
 
 ## How it works
 
