@@ -38,7 +38,7 @@ command -v plasmashell >/dev/null && command -v kpackagetool6 >/dev/null ||
 [[ $(plasmashell --version 2>/dev/null) =~ \ 6\. ]] || die "KDE Plasma 6 is required, found: $(plasmashell --version 2>&1)"
 
 missing=()
-for c in curl jq kscreen-doctor kwriteconfig6 gdbus notify-send flock shuf udevadm systemctl; do
+for c in curl jq kscreen-doctor kwriteconfig6 gdbus notify-send flock shuf udevadm systemctl timeout; do
     command -v "$c" >/dev/null || missing+=("$c")
 done
 command -v magick >/dev/null || command -v convert >/dev/null || missing+=(magick)

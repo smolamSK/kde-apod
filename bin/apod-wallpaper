@@ -68,7 +68,7 @@ api() {
     local out code tmp
     # Via a file, which curl truncates before each retry; on stdout a failed attempt's body would stay.
     tmp=$(mktemp)
-    code=$(curl -sS --max-time 60 --retry "$RETRIES" --retry-delay "$RETRY_DELAY" --retry-max-time "$RETRY_MAX" \
+    code=$(curl -sS --connect-timeout "${CONNECT_MAX:-15}" --max-time "${REQUEST_MAX:-60}" --retry "$RETRIES" --retry-delay "$RETRY_DELAY" --retry-max-time "$RETRY_MAX" \
         -o "$tmp" -w '%{http_code}' "https://api.nasa.gov/planetary/apod?api_key=$API_KEY&$1") ||
         { rm -f "$tmp"; log "NASA API unreachable"; return 1; }
     out=$(<"$tmp"); rm -f "$tmp"
@@ -87,13 +87,22 @@ NEEDS_PAGE='(.title == null or .title == "NASA Science" or (.url // "" | test("/
 # entries QUERY DATE... — APOD API entries for QUERY, one per line, keeping still images
 # and entries that need page_entry; if the API fails, {"date": ...} stubs for DATE... instead.
 entries() {
-    local query=$1 out; shift
+    local query=$1 out parsed; shift
     if out=$(api "$query"); then
-        jq -c "if type == \"array\" then .[] else . end | select($NEEDS_PAGE or .media_type == \"image\")" <<<"$out"
-    else
-        log "trying the APOD website instead"
-        printf '{"date":"%s"}\n' "$@"
+        # Buffer parsing so a broken response cannot emit partial entries before fallback.
+        if parsed=$(jq -cs "
+            if length == 1 then .[0] else error(\"expected one response\") end
+            | if type == \"array\" then .[] else . end
+            | if type == \"object\" and (.date | type == \"string\") then .
+              else error(\"expected an APOD entry\") end
+            | select($NEEDS_PAGE or .media_type == \"image\")" <<<"$out" 2>/dev/null); then
+            [[ -z $parsed ]] || printf '%s\n' "$parsed"
+            return 0
+        fi
+        log "NASA API returned an unreadable response"
     fi
+    log "trying the APOD website instead"
+    printf '{"date":"%s"}\n' "$@"
 }
 
 # page_entry DATE — the APOD entry for DATE read from its science.nasa.gov page, in the API's format.
@@ -101,7 +110,7 @@ page_entry() {
     local date=$1 html want
     # The page's og:title starts with this; an empty one would match any page.
     want=$(LC_ALL=C date -d "$date" '+APOD: %Y %B %-d ') || { log "not a date: $date"; return 1; }
-    html=$(curl -fsSL --max-time 60 --retry "$RETRIES" --retry-delay "$RETRY_DELAY" --retry-max-time "$RETRY_MAX" \
+    html=$(curl -fsSL --connect-timeout "${CONNECT_MAX:-15}" --max-time "${REQUEST_MAX:-60}" --retry "$RETRIES" --retry-delay "$RETRY_DELAY" --retry-max-time "$RETRY_MAX" \
         "https://science.nasa.gov/apod/?date=$date") || { log "APOD page for $date unreachable"; return 1; }
     # Unpublished dates show the APOD landing page, whose og:title has no date.
     jq -Rsc --arg date "$date" --arg want "$want" '
@@ -174,7 +183,7 @@ orig_path() {
 # fetch URL FILE — download URL to FILE (a cached original), leaving nothing behind on failure.
 fetch() {
     local key
-    if curl -fsSL --max-time 300 --retry "$RETRIES" --retry-delay "$RETRY_DELAY" --retry-max-time "$RETRY_MAX" \
+    if curl -fsSL --connect-timeout "${CONNECT_MAX:-15}" --max-time "${DOWNLOAD_MAX:-300}" --retry "$RETRIES" --retry-delay "$RETRY_DELAY" --retry-max-time "$RETRY_MAX" \
             -o "$2.part" "$1"; then
         # A Wi-Fi login page or an error page can come back as a successful download.
         if "$IM" -ping "$2.part[0]" -format '%w' info: >/dev/null 2>&1 && mv "$2.part" "$2"; then
@@ -223,8 +232,8 @@ show() {
             small=1
             continue
         fi
-        set_entry "$entry" "$orig"
-        return
+        set_entry "$entry" "$orig" || return 1
+        return 0
     done 3< <(candidates "$kind" | head -n 5)
     # The widget shows this as the reason, instead of the "trying another" progress lines.
     if (( small )); then log "the pictures tried were smaller than ${RANDOM_MIN_SIZE}px; try again"; fi
@@ -267,14 +276,23 @@ set_entry() {
     cur=$(cat "$CACHE/current" 2>/dev/null) || true   # no current picture on the first run
     # The HD image replacing its standard-size stand-in isn't a new picture.
     [[ $cur == "$orig" || $cur == "$CACHE/orig-$(jq -r .date <<<"$entry")-sd."* ]] || is_new=1
-    jq . <<<"$entry" >"$CACHE/meta.json"
-    echo "$orig" >"$CACHE/current"
-    date +%F >"$CACHE/changed"
-
-    cmd_apply ""
-    prune
+    # Prepare state first, then publish only after the wallpaper was applied.
+    # Renaming each file also keeps status readers from seeing truncated JSON.
+    if ! { jq . <<<"$entry" >"$CACHE/meta.json.part" &&
+           printf '%s\n' "$orig" >"$CACHE/current.part" &&
+           date +%F >"$CACHE/changed.part"; }; then
+        log "couldn't save picture information"; return 1
+    fi
+    cmd_apply "$orig" || return 1
+    if ! { mv "$CACHE/meta.json.part" "$CACHE/meta.json" &&
+           mv "$CACHE/current.part" "$CACHE/current" &&
+           mv "$CACHE/changed.part" "$CACHE/changed"; }; then
+        log "couldn't save picture information"; return 1
+    fi
+    prune || log "couldn't clean up old pictures"
     # Only announce a picture change, not every login or re-apply of the same image.
-    if (( is_new )); then notify; fi
+    if (( is_new )); then notify || true; fi
+    return 0
 }
 
 # Desktop notification with the current picture's title, date, credit and NASA's explanation.
@@ -307,7 +325,7 @@ render() {
     read -r iw ih < <("$IM" "$src[0]" -auto-orient -format '%w %h\n' info:) ||
         { log "can't read $(basename "$src") as an image"; return 1; }
     mode=$(awk -v iw="$iw" -v ih="$ih" -v w="$w" -v h="$h" -v t="$FIT_THRESHOLD" \
-        'BEGIN { r = (iw / ih) / (w / h); if (r < 1) r = 1 / r; print (r <= t ? "crop" : "fit") }')
+        'BEGIN { r = (iw / ih) / (w / h); if (r < 1) r = 1 / r; print (r <= t ? "crop" : "fit") }') || return 1
     log "rendering ${iw}x${ih} -> ${w}x${h} ($mode)"
     if [[ $mode == crop ]]; then
         "$IM" "$src[0]" -auto-orient -resize "${w}x${h}^" -gravity center -extent "${w}x${h}" \
@@ -322,7 +340,7 @@ render() {
 }
 
 cmd_apply() {
-    local orig=$1 key name x y w h prio out map='{}' primary='' best_prio=999999 failed=0
+    local orig=$1 key name x y w h prio out outputs map='{}' primary='' best_prio=999999 failed=0
     if [[ -z $orig && -f $CACHE/current ]]; then orig=$(<"$CACHE/current"); fi
     if [[ -z $orig || ! -f $orig ]]; then
         log "no image available to apply"
@@ -331,16 +349,20 @@ cmd_apply() {
     key=$(basename "${orig%.*}")
     if [[ $key == orig-* ]]; then key=${key#orig-}; else key="custom-$(md5sum "$orig" | cut -c1-8)"; fi
 
+    outputs=$(list_outputs) || { log "couldn't read monitor information"; return 1; }
     while read -r name x y w h prio; do
         [[ -n $name ]] || continue
-        # Unique name per image/monitor/size, so Plasma never shows a stale cached file.
-        out="$CACHE/render-$key-$name-${w}x$h.jpg"
+        # Include the fit setting so changing it cannot reuse an old rendering.
+        out="$CACHE/render-$key-$name-${w}x$h-fit${FIT_THRESHOLD}.jpg"
         # Never point Plasma at a render that doesn't exist; that shows a black screen.
         if [[ ! -s $out ]] && ! render "$orig" "$w" "$h" "$out"; then failed=1; continue; fi
-        touch "$out"
-        map=$(jq -c --arg k "$x,$y" --arg v "file://$out" '. + {($k): $v}' <<<"$map")
+        touch "$out" || { log "couldn't update the rendered picture"; return 1; }
+        map=$(jq -c --arg k "$x,$y" --arg v "file://$out" '. + {($k): $v}' <<<"$map") || return 1
         if (( prio < best_prio )); then best_prio=$prio; primary=$out; fi
-    done < <(list_outputs)
+    done <<<"$outputs"
+
+    # Prepare every monitor before changing the desktop; a partial render is a failure.
+    (( failed == 0 )) || return 1
 
     if [[ -z $primary ]]; then
         (( failed )) || log "no enabled monitors found"
@@ -361,11 +383,12 @@ cmd_apply() {
             d.currentConfigGroup = ['Wallpaper', 'org.kde.image', 'General'];
             d.writeConfig('Image', url);
             d.writeConfig('FillMode', 2);
-        });" >/dev/null
+        });" >/dev/null || { log "couldn't set the desktop wallpaper"; return 1; }
 
     local g=(--file kscreenlockerrc --group Greeter --group Wallpaper --group org.kde.image --group General)
-    kwriteconfig6 "${g[@]}" --key Image "file://$primary"
-    kwriteconfig6 "${g[@]}" --key PreviewImage "file://$primary"
+    kwriteconfig6 "${g[@]}" --key Image "file://$primary" &&
+        kwriteconfig6 "${g[@]}" --key PreviewImage "file://$primary" ||
+        { log "couldn't set the lock-screen wallpaper"; return 1; }
     log "applied $key to $(jq -r 'length' <<<"$map") monitor(s)"
 }
 
@@ -425,9 +448,11 @@ case $cmd in
         lock; cmd_apply "$image" ;;
     latest)   # from the widget: don't sit behind a background run that's retrying
         RETRIES=2 RETRY_DELAY=3 RETRY_MAX=20
+        CONNECT_MAX=5 REQUEST_MAX=15 DOWNLOAD_MAX=30
         lock 60; show latest && echo latest >"$CACHE/mode" ;;
     random)
         RETRIES=2 RETRY_DELAY=3 RETRY_MAX=20
+        CONNECT_MAX=5 REQUEST_MAX=15 DOWNLOAD_MAX=30
         lock 60; show random && echo random >"$CACHE/mode" ;;
     status) cmd_status ;;
     watch) cmd_watch ;;

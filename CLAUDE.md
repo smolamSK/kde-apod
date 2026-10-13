@@ -4,13 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A KDE Plasma 6 wallpaper tool for NASA's Astronomy Picture of the Day. Everything happens in one bash script, `bin/apod-wallpaper`. The systemd user units (`systemd/`) and the Plasma panel widget (`plasmoid/`) only call its subcommands. There is no build step and no test suite.
+A KDE Plasma 6 wallpaper tool for NASA's Astronomy Picture of the Day. Everything happens in one bash script, `bin/apod-wallpaper`. The systemd user units (`systemd/`) and the Plasma panel widget (`plasmoid/`) only call its subcommands. There is no build step. Offline regression tests live in `tests/`.
 
 ## Development
 
 - **The units and the widget run the installed copy** (`~/.local/bin/apod-wallpaper`), not the repo. After editing, run `./install.sh` to copy the script, units and widget. Existing settings are kept, and the run sets today's wallpaper.
 - Running the script straight from the repo works too, e.g. `bin/apod-wallpaper update --date 2026-09-25` or `bin/apod-wallpaper status`. `update`, `latest`, `random` and `apply` change the real desktop and lock-screen wallpaper and can send a notification. `status` and `help` are read-only.
 - Syntax check: `bash -n bin/apod-wallpaper install.sh uninstall.sh`. The script has shellcheck directives, but shellcheck isn't installed on this machine.
+- Regression tests: `python3 -B -m unittest discover -s tests -v` (standard-library Python, Bash, jq; temporary state and mocked external calls).
 - QML: `/usr/lib64/qt6/bin/qmllint plasmoid/contents/ui/main.qml`. To try the widget without the panel: `plasmoidviewer -a plasmoid`.
 - Logs: `journalctl --user -u apod-wallpaper -u apod-wallpaper-watch`.
 - `./uninstall.sh --dry-run` prints what it would remove.
@@ -26,11 +27,12 @@ A KDE Plasma 6 wallpaper tool for NASA's Astronomy Picture of the Day. Everythin
 - **The APOD API is unreliable since APOD moved to science.nasa.gov.** It returns placeholder entries (title "NASA Science", logo URL); the `NEEDS_PAGE` jq filter matches these. When the API fails completely, `entries` emits `{"date": ...}` stubs. `resolve` replaces both kinds with `page_entry`, which scrapes `science.nasa.gov/apod/?date=…` with jq regexes into the API's JSON shape. Those regexes depend on the page's markup (`og:title` "APOD: YYYY Month D", `h1.display-48`, `media-detail-hero__description`). Check them first when page fallback breaks.
 - `download` tries `hdurl` first. If that fails, it falls back to `url` and caches it as `orig-DATE-sd.*`, so a later run still upgrades to HD. `set_entry` doesn't count the sd→HD swap as a new picture, so no second notification is sent.
 - When nothing could be fetched, `show` re-applies the current image and returns 1. `latest`/`random` only write the `mode` file on success.
-- Retries: each request retries for up to `RETRY_MAX`. That is 15 minutes in background runs, and systemd's `TimeoutStartSec` stops the whole run after 15 minutes. The widget's `latest`/`random` commands lower `RETRIES`/`RETRY_DELAY`/`RETRY_MAX` to about 20 seconds per request, and wait at most 60 seconds for the lock (`lock 60`) when a background run holds it.
-- `fetch` only keeps a download that ImageMagick can read, so a Wi-Fi login page or error page never becomes the wallpaper. `cmd_apply` skips any monitor whose render failed, rather than pointing Plasma at a missing file.
+- Malformed API JSON and invalid entry shapes use the same date-stub fallback as HTTP failures; legitimate empty/video-only results do not.
+- Retries: `RETRY_MAX` limits when retries start, not the duration of an individual transfer. Background runs have a 15-minute systemd limit. `latest`/`random` use 5-second connection, 15-second metadata, and 30-second image limits, and wait at most 60 seconds for the lock. The widget wraps the whole action in `timeout --kill-after=5s 90s` and reports timeout failures.
+- `fetch` only keeps a download that ImageMagick can read. `cmd_apply` prepares all monitor renders before changing the desktop and returns failure if any render, monitor query, desktop call, or lock-screen write fails. `set_entry` stages metadata and publishes state only after successful application; failed applications do not notify or change mode. Desktop and lock-screen updates are separate external operations, so a late failure can still leave a partially updated desktop.
 
 ### `set -e` depends on the call path
-`set -e` is on in `update` and `apply`, where the call chain is plain, so any failing command aborts the run, even deep inside `set_entry` or `render`. `latest`/`random` call `show … && echo … >mode`, and bash turns `set -e` off inside that whole call. The same code can therefore abort in one path and carry on in the other.
+`latest`/`random` call `show … && echo … >mode`, and Bash turns `set -e` off inside that whole call. Helpers also use conditional calls to propagate failures explicitly. Never assume `set -e` will abort a helper: the same code can abort in one call path and carry on in another.
 - Guard commands that are expected to fail with `|| true` or an explicit `||` branch, e.g. `cur=$(cat "$CACHE/current" 2>/dev/null) || true` (there is no `current` on the first run).
 - Handle real failures explicitly instead of relying on `set -e`.
 - Don't use `((n++))` for counters: it returns 1 when `n` was 0.
@@ -50,9 +52,9 @@ A KDE Plasma 6 wallpaper tool for NASA's Astronomy Picture of the Day. Everythin
 | `meta.json` | The APOD entry |
 | `.lock` | `flock` lock for every command that writes |
 | `orig-DATE[-sd].ext` | Downloaded originals |
-| `render-KEY-OUTPUT-WxH.jpg` | Per-monitor renders |
+| `render-KEY-OUTPUT-WxH-fitTHRESHOLD.jpg` | Per-monitor renders |
 
-- Each render has a unique name per image, monitor and size so Plasma never shows a stale cached file. `KEY` is the original's basename without `orig-`, or `custom-<md5>` for `apply --image`.
+- Each render has a unique name per image, monitor, size and fit threshold so a setting change produces a fresh render. `KEY` is the original's basename without `orig-`, or `custom-<md5>` for `apply --image`.
 - `cmd_status`, `prune` and `fetch` all find renders through this naming scheme. If you change it, change all three.
 - `status` and `help` must not create the cache directory.
 
@@ -64,7 +66,7 @@ A KDE Plasma 6 wallpaper tool for NASA's Astronomy Picture of the Day. Everythin
 - **The config is `source`d by bash.** For that reason `install.sh` only accepts alphanumeric API keys and writes them quoted.
 - **Help text comes from header comments.** `help` (and `--help` in both install scripts) prints the file's leading comment block. To add or change a subcommand, edit the header comment, the `case` dispatch, and the README's "Command line" section.
 - **Settings are listed in three places.** Every setting has its default at the top of the script, a commented line in `config/apod-wallpaper.conf`, and a row in the README's Configuration table. Keep them in sync.
-- **Required commands are listed twice.** The `need` list in the dispatch and the requirement check in `install.sh` should match.
+- **Required commands.** Keep the script's `need` list and the installer checks synchronized. The installer additionally checks service tools and `timeout`, which the widget uses to bound interactive actions.
 - **Widget IDs.** The widget ID is `io.github.smolamsk.apodwallpaper`. `install.sh` migrates panels from the first-release ID `org.smolam.apodwallpaper`, and `uninstall.sh` removes both.
 
 ## Conventions

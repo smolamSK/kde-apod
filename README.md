@@ -15,6 +15,8 @@ NASA's [Astronomy Picture of the Day](https://science.nasa.gov/apod/) as your KD
   - **Latest:** NASA's new picture every day.
   - **Random:** a random picture from the archive every day, plus a **Shuffle** button for another one right away.
 
+The selected mode is disabled once a picture is loaded; use **Shuffle** for another random picture. Failed actions can be retried. Widget actions time out after 90 seconds (with up to 5 seconds to stop), while the daily background service allows longer downloads.
+
 ## Requirements
 
 - KDE Plasma 6 (Wayland or X11) with systemd
@@ -65,6 +67,8 @@ Settings are in `~/.config/apod-wallpaper.conf`:
 
 To change the daily time, run `systemctl --user edit apod-wallpaper.timer` and override `OnCalendar=`.
 
+After changing `FIT_THRESHOLD`, run `apod-wallpaper apply` to render the current picture with the new setting.
+
 ## Command line
 
 ```
@@ -103,6 +107,20 @@ Monitor sizes come from `kscreen-doctor`. The wallpaper is set per desktop throu
 - **See what happened:** `journalctl --user -u apod-wallpaper -u apod-wallpaper-watch`
 - **"NASA API rate limit reached":** you're using `DEMO_KEY`. Get a free key and run `./install.sh --api-key YOUR_KEY`.
 - **Wrong fit after changing a monitor's resolution or rotation:** run `apod-wallpaper apply`. Only plugging and unplugging monitors is detected automatically.
+
+## Development
+
+There is no build step. Run these checks from the repository root:
+
+```sh
+bash -n bin/apod-wallpaper install.sh uninstall.sh
+python3 -B -m unittest discover -s tests -v
+/usr/lib64/qt6/bin/qmllint plasmoid/contents/ui/main.qml
+```
+
+The regression tests use Python's standard library, Bash, and jq, with temporary state and mocked desktop/network calls. Adjust the Qt tool path for your distribution. Preview the widget with `plasmoidviewer -a plasmoid`; verify empty, loading, error, Latest, and Random states, including a small popup and long picture titles.
+
+Run `./install.sh` to use changes in your panel and services. Installation updates the live wallpaper and preserves existing settings.
 
 ## License
 

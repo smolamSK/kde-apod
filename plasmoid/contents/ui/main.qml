@@ -1,5 +1,7 @@
 // Panel widget for apod-wallpaper (https://github.com/smolamSK/kde-apod): shows the current NASA APOD
 // wallpaper and switches between the "latest" and "random" modes.
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Layouts
 import org.kde.plasma.plasmoid
@@ -18,6 +20,9 @@ PlasmoidItem {
     property bool busy: false
     property string busyText: ""
     property string error: ""
+    property string statusError: ""
+    readonly property string displayError: error || statusError
+    readonly property bool hasPicture: !!info.date
     readonly property bool randomMode: info.mode === "random"
 
     Plasmoid.icon: "kstars_planets-symbolic"
@@ -33,7 +38,8 @@ PlasmoidItem {
         busy = true
         busyText = text
         error = ""
-        exec.connectSource(command + " " + action)
+        // Bound the complete action, including lock waits, retries and rendering.
+        exec.connectSource("timeout --kill-after=5s 90s " + command + " " + action)
     }
 
     function showLatest() { run("latest", "Fetching today's picture…") }
@@ -45,7 +51,16 @@ PlasmoidItem {
         onNewData: (source, data) => {
             disconnectSource(source)
             if (source.endsWith(" status")) {
-                try { root.info = JSON.parse(data.stdout) } catch (e) { }
+                try {
+                    if (data["exit code"] !== 0) throw new Error("status failed")
+                    const info = JSON.parse(data.stdout)
+                    if (!info || (info.mode !== "latest" && info.mode !== "random"))
+                        throw new Error("invalid status")
+                    root.info = info
+                    root.statusError = ""
+                } catch (e) {
+                    root.statusError = "Couldn't read picture information. Reopen the widget to try again."
+                }
                 return
             }
             root.busy = false
@@ -57,10 +72,12 @@ PlasmoidItem {
                 const lines = data.stderr.split("\n")
                     .filter(l => l.startsWith(prefix))
                     .map(l => l.slice(prefix.length).trim())
-                const isCause = l => l && !/^(no picture fetched|applied|rendering|downloading|trying )|is under \d+px|using the standard-size/.test(l)
+                const isCause = l => l && !/^(no picture fetched|applied|rendering \d+x\d+|downloading|trying )|is under \d+px|using the standard-size/.test(l)
                 const cause = lines.slice(lines.lastIndexOf("trying the APOD website instead") + 1).find(isCause)
                     || lines.find(isCause)
-                root.error = cause || "Couldn't fetch a picture"
+                root.error = (data["exit code"] === 124 || data["exit code"] === 137)
+                    ? "This is taking too long. Please try again."
+                    : cause || "Couldn't fetch a picture"
             }
             root.refresh()
         }
@@ -80,7 +97,7 @@ PlasmoidItem {
         PlasmaCore.Action {
             text: "Latest picture of the day"
             icon.name: "view-calendar-day-symbolic"
-            enabled: !root.busy
+            enabled: !root.busy && (!root.hasPicture || root.randomMode || root.displayError !== "")
             onTriggered: root.showLatest()
         },
         PlasmaCore.Action {
@@ -102,6 +119,7 @@ PlasmoidItem {
             spacing: Kirigami.Units.largeSpacing
 
             Kirigami.ShadowedImage {
+                visible: root.hasPicture || root.busy
                 Layout.fillWidth: true
                 Layout.preferredHeight: width * 10 / 16
                 radius: Kirigami.Units.cornerRadius
@@ -120,83 +138,90 @@ PlasmoidItem {
 
             ColumnLayout {
                 Layout.fillWidth: true
-                spacing: 0
+                Layout.fillHeight: true
+                Layout.margins: Kirigami.Units.largeSpacing
+                spacing: Kirigami.Units.largeSpacing
 
-                PlasmaExtras.Heading {
+                ColumnLayout {
                     Layout.fillWidth: true
-                    level: 3
-                    wrapMode: Text.Wrap
-                    text: root.info.title || "No picture yet"
+                    spacing: 0
+
+                    PlasmaExtras.Heading {
+                        Layout.fillWidth: true
+                        level: 3
+                        wrapMode: Text.Wrap
+                        text: root.info.title || "No picture yet"
+                    }
+                    PlasmaComponents.Label {
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                        opacity: 0.7
+                        text: [root.info.date, root.info.credit ? "© " + root.info.credit : ""].filter(Boolean).join(" · ")
+                    }
                 }
+
+                RowLayout {
+                    Layout.fillWidth: true
+
+                    PlasmaComponents.Button {
+                        text: "Latest"
+                        icon.name: "view-calendar-day-symbolic"
+                        checked: root.hasPicture && !root.randomMode
+                        enabled: !root.busy && (!root.hasPicture || root.randomMode || root.displayError !== "")
+                        onClicked: root.showLatest()
+                        PlasmaComponents.ToolTip { text: "Show NASA's newest picture every day" }
+                    }
+                    PlasmaComponents.Button {
+                        text: "Random"
+                        icon.name: "roll"
+                        checked: root.hasPicture && root.randomMode
+                        enabled: !root.busy && (!root.hasPicture || !root.randomMode || root.displayError !== "")
+                        onClicked: root.showRandom()
+                        PlasmaComponents.ToolTip { text: "Show a random archive picture every day" }
+                    }
+                    Item { Layout.fillWidth: true }
+                    PlasmaComponents.ToolButton {
+                        text: "Shuffle"
+                        icon.name: "media-playlist-shuffle"
+                        visible: root.randomMode
+                        enabled: !root.busy
+                        onClicked: root.showRandom()
+                        PlasmaComponents.ToolTip { text: "Another random picture now" }
+                    }
+                }
+
                 PlasmaComponents.Label {
                     Layout.fillWidth: true
+                    visible: root.busy || root.displayError !== ""
                     wrapMode: Text.Wrap
-                    opacity: 0.7
-                    text: [root.info.date, root.info.credit ? "© " + root.info.credit : ""].filter(Boolean).join(" · ")
+                    color: !root.busy && root.displayError !== "" ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.textColor
+                    text: root.busy ? root.busyText : root.displayError
                 }
-            }
 
-            RowLayout {
-                Layout.fillWidth: true
+                PlasmaComponents.ScrollView {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    PlasmaComponents.ScrollBar.horizontal.policy: PlasmaComponents.ScrollBar.AlwaysOff
 
-                PlasmaComponents.Button {
-                    text: "Latest"
-                    icon.name: "view-calendar-day-symbolic"
-                    checked: !root.randomMode
-                    enabled: !root.busy
-                    onClicked: root.showLatest()
-                    PlasmaComponents.ToolTip { text: "Show NASA's newest picture every day" }
+                    // A TextArea sizes itself to the ScrollView, avoiding a width binding loop.
+                    PlasmaComponents.TextArea {
+                        readOnly: true
+                        wrapMode: Text.Wrap
+                        textFormat: TextEdit.PlainText
+                        background: null
+                        leftPadding: 0
+                        selectByMouse: true
+                        text: root.hasPicture ? (root.info.explanation || "") : "Choose Latest or Random to load a picture."
+                    }
                 }
-                PlasmaComponents.Button {
-                    text: "Random"
-                    icon.name: "roll"
-                    checked: root.randomMode
-                    enabled: !root.busy
-                    onClicked: root.showRandom()
-                    PlasmaComponents.ToolTip { text: "Show a random archive picture every day" }
-                }
-                Item { Layout.fillWidth: true }
+
                 PlasmaComponents.ToolButton {
-                    text: "Shuffle"
-                    icon.name: "media-playlist-shuffle"
-                    visible: root.randomMode
-                    enabled: !root.busy
-                    onClicked: root.showRandom()
-                    PlasmaComponents.ToolTip { text: "Another random picture now" }
+                    Layout.alignment: Qt.AlignRight
+                    text: "Open on NASA Science"
+                    icon.name: "internet-web-browser-symbolic"
+                    enabled: !!root.info.page
+                    onClicked: Qt.openUrlExternally(root.info.page)
                 }
-            }
-
-            PlasmaComponents.Label {
-                Layout.fillWidth: true
-                visible: root.busy || root.error !== ""
-                wrapMode: Text.Wrap
-                color: root.error !== "" ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.textColor
-                text: root.busy ? root.busyText : root.error
-            }
-
-            PlasmaComponents.ScrollView {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                PlasmaComponents.ScrollBar.horizontal.policy: PlasmaComponents.ScrollBar.AlwaysOff
-
-                // A TextArea sizes itself to the ScrollView, avoiding a width binding loop.
-                PlasmaComponents.TextArea {
-                    readOnly: true
-                    wrapMode: Text.Wrap
-                    textFormat: TextEdit.PlainText
-                    background: null
-                    leftPadding: 0
-                    selectByMouse: true
-                    text: root.info.explanation || ""
-                }
-            }
-
-            PlasmaComponents.ToolButton {
-                Layout.alignment: Qt.AlignRight
-                text: "Open on NASA Science"
-                icon.name: "internet-web-browser-symbolic"
-                enabled: !!root.info.page
-                onClicked: Qt.openUrlExternally(root.info.page)
             }
         }
     }
