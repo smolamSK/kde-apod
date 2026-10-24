@@ -4,6 +4,8 @@ NASA's [Astronomy Picture of the Day](https://science.nasa.gov/apod/) as your KD
 
 ![The APOD Wallpaper panel widget](screenshot.png)
 
+Also for [Omarchy](https://github.com/smolamSK/omarchy-apod) and [macOS](https://github.com/smolamSK/macos-apod), both with a colour theme made from the picture.
+
 ## Features
 
 - **Daily wallpaper.** A new picture every morning at 07:00, and at login if the computer was off. On days when APOD is a video, the most recent photo stays.
