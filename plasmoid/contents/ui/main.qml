@@ -91,7 +91,7 @@ PlasmoidItem {
     }
 
     Component.onCompleted: refresh()
-    onExpandedChanged: if (expanded) refresh()
+    onExpandedChanged: if (root.expanded) root.refresh()
 
     Plasmoid.contextualActions: [
         PlasmaCore.Action {
